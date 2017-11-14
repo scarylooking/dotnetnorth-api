@@ -5,10 +5,11 @@ using System.Threading.Tasks;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.Http;
 using Microsoft.Azure.WebJobs.Host;
-using Microsoft.WindowsAzure.Storage.Table;
 using DotNetNorthAPI.Models;
 using System.Linq;
+using System.Text;
 using DotNetNorthAPI.Responses;
+using Newtonsoft.Json;
 
 namespace DotNetNorthAPI
 {
@@ -16,28 +17,26 @@ namespace DotNetNorthAPI
     {
         [FunctionName("feedback")]
         public static async Task<HttpResponseMessage> Run(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "post")]HttpRequestMessage req,
-            [Table("feedback", Connection = "dotnetnorth_storage")]ICollector<EventFeedbackModel> feedbackTable,
-            [Table("tickets", Connection = "dotnetnorth_storage")]ICollector<TicketModel> ticketTable,
+            [HttpTrigger(AuthorizationLevel.Anonymous, "post")] HttpRequestMessage req,
+            [Table("feedback", Connection = "dotnetnorth_storage")] ICollector<EventFeedbackModel> feedbackTable,
+            [Table("tickets", Connection = "dotnetnorth_storage")] ICollector<TicketModel> ticketTable,
             TraceWriter log)
         {
-            string eventId = req.GetQueryNameValuePairs().FirstOrDefault(q => q.Key.Equals("event")).Value;
-            
+            var eventId = req.GetQueryNameValuePairs().FirstOrDefault(q => q.Key.Equals("event")).Value;
+
             if (!IsEventIdValid(eventId, log))
             {
-                return req.CreateResponse(HttpStatusCode.BadRequest, "Event ID is invalid");
+                return new HttpResponseMessage(HttpStatusCode.BadRequest);
             }
 
-            var feedbackModel = await req.Content.ReadAsAsync<EventFeedbackModel>();
+            var feedbackModel = await req.Content.ReadAsAsync<EventFeedbackRequestModel>();
 
             if (!IsRequestValid(feedbackModel, log))
             {
-                return req.CreateResponse(HttpStatusCode.BadRequest, "Feedback model is invalid");
+                return new HttpResponseMessage(HttpStatusCode.BadRequest);
             }
 
-            var ticket = GenerateTicket(eventId, 6);
-
-            var feedback = new EventFeedbackModel()
+            var feedback = new EventFeedbackModel
             {
                 PartitionKey = eventId.ToLower(),
                 RowKey = Guid.NewGuid().ToString(),
@@ -51,21 +50,48 @@ namespace DotNetNorthAPI
             };
 
             feedbackTable.Add(feedback);
-            ticketTable.Add(ticket);
 
-            return req.CreateResponse(HttpStatusCode.OK, new TicketResponse
+            var ticket = string.Empty;
+
+            if (!string.IsNullOrWhiteSpace(feedbackModel.PhoneNumber))
             {
-                TicketId = ticket.RowKey
-            });
+                ticket = GenerateTicket(eventId, 6);
+
+                var ticketModel = new TicketModel
+                {
+                    PartitionKey = eventId,
+                    RowKey = ticket
+                };
+                SendText(feedbackModel.PhoneNumber, ticket);
+                ticketTable.Add(ticketModel);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(JsonConvert.SerializeObject(new TicketResponse { TicketId = ticket }), Encoding.UTF8, "application/json")
+            };
         }
 
-        private static bool IsRequestValid(EventFeedbackModel feedback, TraceWriter log)
+
+
+        private static async void SendText(string mobile, string ticket)
         {
-            if (feedback.SpeakerPresentationSkillScore < 1 || feedback.SpeakerPresentationSkillScore > 5) return false;
-            if (feedback.SpeakerKnowledgeScore < 1 || feedback.SpeakerKnowledgeScore > 5) return false;
-            if (feedback.VenueRefreshmentsScore < 1 || feedback.VenueRefreshmentsScore > 5) return false;
-            if (feedback.VenueLocationScore < 1 || feedback.VenueLocationScore > 5) return false;
-            if (feedback.VenueFacilitiesScore < 1 || feedback.VenueFacilitiesScore > 5) return false;
+            var client = new HttpClient();
+
+            var apiKey = Environment.GetEnvironmentVariable("ClockworkSMSApiKey");
+            var encodedMobile = WebUtility.UrlEncode(mobile);
+            var encodedMessage = WebUtility.UrlEncode($"Thanks! Your raffle ticket number is {ticket}.");
+
+            var x = await client.GetStringAsync($"https://api.clockworksms.com/http/send.aspx?key={apiKey}&to={encodedMobile}&content={encodedMessage}&from=DotNetNorth");
+        }
+
+        private static bool IsRequestValid(EventFeedbackRequestModel feedbackRequest, TraceWriter log)
+        {
+            if (feedbackRequest.SpeakerPresentationSkillScore < 1 || feedbackRequest.SpeakerPresentationSkillScore > 5) return false;
+            if (feedbackRequest.SpeakerKnowledgeScore < 1 || feedbackRequest.SpeakerKnowledgeScore > 5) return false;
+            if (feedbackRequest.VenueRefreshmentsScore < 1 || feedbackRequest.VenueRefreshmentsScore > 5) return false;
+            if (feedbackRequest.VenueLocationScore < 1 || feedbackRequest.VenueLocationScore > 5) return false;
+            if (feedbackRequest.VenueFacilitiesScore < 1 || feedbackRequest.VenueFacilitiesScore > 5) return false;
 
             return true;
         }
@@ -78,17 +104,13 @@ namespace DotNetNorthAPI
             return true;
         }
 
-        private static TicketModel GenerateTicket(string eventId, int length)
+        private static string GenerateTicket(string eventId, int length)
         {
             var random = new Random();
             const string chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
             var ticketNumber = new string(Enumerable.Repeat(chars, length).Select(s => s[random.Next(s.Length)]).ToArray());
 
-            return new TicketModel
-            {
-                PartitionKey = eventId,
-                RowKey = ticketNumber
-            };
+            return ticketNumber;
         }
     }
 }

@@ -1,33 +1,38 @@
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Text;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.Http;
 using Microsoft.Azure.WebJobs.Host;
 using DotNetNorthAPI.Models;
+using Newtonsoft.Json;
 
 namespace DotNetNorthAPI
 {
     public static class GetTickets
     {
-        [FunctionName("Ticket")]
+        [FunctionName("ticket")]
         public static HttpResponseMessage Run(
-            [HttpTrigger(AuthorizationLevel.Function, "get")]HttpRequestMessage req, 
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get")]HttpRequestMessage req, 
             [Table("tickets", Connection = "dotnetnorth_storage")]IQueryable<TicketModel> ticketTable, 
             TraceWriter log)
         {
-            string eventId = req.GetQueryNameValuePairs().FirstOrDefault(q => q.Key.Equals("event")).Value;
+            var eventId = req.GetQueryNameValuePairs().FirstOrDefault(q => q.Key.Equals("event")).Value;
 
             if (!IsEventIdValid(eventId, log))
             {
-                return req.CreateResponse(HttpStatusCode.BadRequest, "Event ID is invalid");
+                return new HttpResponseMessage(HttpStatusCode.BadRequest);
             }
 
             var tickets = ticketTable
                 .Where(t => t.PartitionKey.Equals(eventId, System.StringComparison.InvariantCultureIgnoreCase))
                 .Select(t => t.RowKey);
 
-            return req.CreateResponse(HttpStatusCode.OK, tickets.ToArray());
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(JsonConvert.SerializeObject(tickets.ToArray()), Encoding.UTF8, "application/json")
+            };
         }
 
         private static bool IsEventIdValid(string eventId, TraceWriter log)
